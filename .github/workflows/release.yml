@@ -16,22 +16,22 @@ jobs:
             artifact_name: mfa-support-tool
             release_name: mfa-support-tool-linux-amd64-musl
             target: x86_64-unknown-linux-musl
-            strip: true
+            # strip: true
           - os: windows-latest
             artifact_name: mfa-support-tool.exe
             release_name: mfa-support-tool-windows-amd64.exe
             target: x86_64-pc-windows-msvc
-            strip: true
+            # strip: true
           - os: macos-latest
             artifact_name: mfa-support-tool
             release_name: mfa-support-tool-macos-amd64
             target: x86_64-apple-darwin
-            strip: true
+            # strip: true
           - os: macos-latest
             artifact_name: mfa-support-tool
             release_name: mfa-support-tool-macos-arm64
             target: aarch64-apple-darwin
-            strip: true
+            # strip: true
 
     steps:
       - uses: actions/checkout@v1
@@ -48,11 +48,11 @@ jobs:
           use-cross: true
           command: build
           args: --release --target ${{ matrix.target }}
-      - uses: svenstaro/upx-action@v2
-        with:
-          file: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          strip: ${{ matrix.strip }}
-          args: ${{ matrix.args }}
+      # - uses: svenstaro/upx-action@v2
+      #   with:
+      #     file: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      #     strip: ${{ matrix.strip }}
+      #     args: ${{ matrix.args }}
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v1-release
         with:
