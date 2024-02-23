@@ -1,14 +1,11 @@
-use std::{
-    ops::Deref,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{ops::Deref, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context};
 use log::{debug, error, info};
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 pub type RefreshToken = Arc<Mutex<Option<String>>>;
 
@@ -95,7 +92,7 @@ pub async fn get_token(
     let roles: Vec<InnerRole> = try_extract(&response, "/access/user/roles")?;
     debug!("User roles: {roles:?}");
     // Check user has required roles
-    for role in ["cid-internal-support", "mfa-support"] {
+    for role in ["cid-internal-support", "cid-mfa-support"] {
         if !roles.iter().any(|r| r.name == role) {
             bail!("user '{}' doesn't have the `{}` role.", sso, role);
         }
@@ -116,7 +113,7 @@ pub async fn refresh_token(
     loop {
         sleep.tick().await;
         let new_token = get_token(client, &sso, &password).await;
-        let mut mutex = token.lock().expect("Cannot unlock mutex");
+        let mut mutex = token.lock().await;
         *mutex = match new_token {
             Ok(t) => Some(t),
             Err(e) => {
