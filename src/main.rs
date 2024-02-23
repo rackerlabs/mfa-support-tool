@@ -1,11 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    io::{self, Write},
+    sync::Arc,
+};
 
-use anyhow::bail;
+use inquire::InquireError;
 use log::{debug, error, info};
 use mfa_support_tool::{
     client::{get_token, probe, refresh_token, WrappedClient},
     input::{read_and_get_domain, read_from_stdin, read_user_password, ChangeStatus},
 };
+use tokio::sync::Mutex;
 
 async fn main_inner() -> anyhow::Result<()> {
     // set logging level to info if unset
@@ -40,7 +44,7 @@ Tool support: jorge.munoz/juan.davila
     probe(&client).await?;
 
     let (sso, password, token) = loop {
-        let (sso, password) = read_user_password();
+        let (sso, password) = read_user_password()?;
         match get_token(&client, &sso, &password).await {
             Ok(token) => break (sso, password, token),
             Err(e) => {
@@ -51,36 +55,60 @@ Tool support: jorge.munoz/juan.davila
 
     // Periodically refresh the token in background.
     let shared_token = Arc::new(Mutex::new(Some(token)));
-    let token_clone = shared_token.clone();
-    let client_clone = client.clone();
 
-    tokio::spawn(async move {
-        refresh_token(&client_clone, token_clone, sso, password).await;
+    tokio::spawn({
+        let client = client.clone();
+        let token = shared_token.clone();
+        let (sso, password) = (sso.clone(), password.clone());
+        async move {
+            refresh_token(&client, token, sso, password).await;
+        }
     });
 
     // Main loop
     loop {
-        let token = {
-            let guard = shared_token.lock().expect("Cannot lock mutex");
+        // Token loop: We always try to pull the in-memory token here. However,
+        // that token is periodically refreshed and there might be a possibility
+        // the token wasn't refreshed. We check here if something failed, and if
+        // something did fail, we try to authenticate again.
+        let token = 'token: loop {
+            let mut guard = shared_token.lock().await;
+            // This will only run if the periodic task failed.
             let Some(token) = guard.as_ref() else {
-                bail!("exiting: there's no valid auth token");
+                // Try to refresh the token manually and set it for future usage.
+                match get_token(&client, &sso, &password).await {
+                    Ok(token) => {
+                        *guard = Some(token.clone());
+                        break 'token token;
+                    }
+                    Err(e) => {
+                        error!("Couldn't refresh token. Press ctrl-c to exit, or enter to try the refresh the token again. Error: {e}");
+                        continue 'token;
+                    }
+                }
             };
-            token.to_owned()
+            break 'token token.to_owned();
         };
 
-        let domain = read_and_get_domain(&client, &token).await;
+        let domain = read_and_get_domain(&client, &token).await?;
         match domain.change_enforcement_level(&client, &token).await {
             Ok(ChangeStatus::Unchanged) => {
                 print!("{}[2J", 27 as char); // clear screen
-                continue;
+                io::stdout().flush().ok();
             }
             Ok(ChangeStatus::Changed) => {
                 info!("MFA level successfully changed. Press ctrl-c to exit, or enter to modify another domain.");
                 read_from_stdin().ok();
                 print!("{}[2J", 27 as char);
+                io::stdout().flush().ok();
             }
             Err(e) => {
-                error!("An error ocurred: {e:?}. Press ctrl-c to exit, or enter to modify another domain.")
+                // abort execution if ctrl-c was pressed
+                if let Some(InquireError::OperationInterrupted) = e.downcast_ref::<InquireError>() {
+                    return Err(e);
+                }
+                error!("An error ocurred: {e:?}. Press ctrl-c to exit, or enter to modify another domain.");
+                read_from_stdin().ok();
             }
         }
     }
@@ -90,9 +118,15 @@ Tool support: jorge.munoz/juan.davila
 async fn main() -> anyhow::Result<()> {
     match main_inner().await {
         Ok(_) => {}
-        Err(e) => println!("ERROR: {:?}", e),
+        Err(e) => {
+            if let Some(InquireError::OperationInterrupted) = e.downcast_ref::<InquireError>() {
+                // user pressed ctrl-c, don't show error message.
+            } else {
+                println!("Unhandled error: {:?}", e)
+            }
+        }
     }
-    println!("\nPress any key to exit.");
+    println!("\nPress any key to terminate this program.");
     read_from_stdin().ok();
     Ok(())
 }

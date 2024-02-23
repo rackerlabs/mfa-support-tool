@@ -1,6 +1,7 @@
-use std::io;
+use std::{fmt::Display, io};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
+use inquire::{validator::MinLengthValidator, InquireError, Password, Select, Text};
 use log::{debug, error, info};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,39 +14,22 @@ pub fn read_from_stdin() -> anyhow::Result<String> {
         .read_line(&mut buff)
         .context("stdin read failure")?;
     let ret = buff.trim();
-    if ret.is_empty() {
-        bail!("input must not be empty");
-    }
     Ok(ret.into())
 }
 
-// Read any given choice from stdin.
-pub fn read_choice(prompt_message: &str, choices: Vec<&str>) -> String {
-    loop {
-        println!("{}", prompt_message);
-        match read_from_stdin() {
-            Ok(s) => {
-                if choices.iter().any(|choice| s == *choice) {
-                    return s;
-                }
-                error!(
-                    "'{}' is not a valid choice. Valid choices: {:?}",
-                    s, choices
-                );
-            }
-            Err(e) => {
-                error!("Couldn't read choice: {}", e);
-            }
-        }
-    }
-}
-
 // Read the user's sso and password
-pub fn read_user_password() -> (String, String) {
+pub fn read_user_password() -> anyhow::Result<(String, String)> {
     let sso = loop {
-        println!("Enter your SSO: ");
-        match read_from_stdin() {
+        let name = Text::new("Enter your SSO:")
+            .with_help_message("This is the username you use to log in into the Rackspace network.")
+            .with_validator(MinLengthValidator::new(1))
+            .prompt();
+        match name {
             Ok(s) => break s,
+            // Bubble up ctrl-c if it was pressed
+            Err(InquireError::OperationInterrupted) => {
+                return Err(InquireError::OperationInterrupted.into())
+            }
             Err(e) => {
                 error!("Cannot read username: {}. Please try again.", e);
             }
@@ -53,18 +37,24 @@ pub fn read_user_password() -> (String, String) {
     };
 
     let password = loop {
-        println!("Enter your password (input will be hidden): ");
-        match rpassword::read_password() {
-            Ok(s) => {
-                if !s.is_empty() {
-                    break s;
-                }
-                error!("Cannot use an empty password. Please try again.");
+        // println!("Enter your password (input will be hidden): ");
+        let password = Password::new("Enter your password:")
+            .with_help_message(
+                "This is the Rackspace account's password. Note: Input will be hidden.",
+            )
+            .without_confirmation()
+            .with_validator(MinLengthValidator::new(1))
+            .prompt();
+        match password {
+            Ok(s) => break s,
+            Err(InquireError::OperationInterrupted) => {
+                return Err(InquireError::OperationInterrupted.into());
             }
+
             Err(e) => error!("Cannot read password: {}. Please try again.", e),
         }
     };
-    (sso, password)
+    Ok((sso, password))
 }
 
 pub enum ChangeStatus {
@@ -72,12 +62,46 @@ pub enum ChangeStatus {
     Changed,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
+#[serde(rename_all(serialize = "UPPERCASE", deserialize = "UPPERCASE"))]
+pub enum EnforcementLevel {
+    Required,
+    #[serde(alias = "RACKSPACE_MANDATED")]
+    RackspaceMandated,
+    Optional,
+    LeaveUnchanged,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DomainType {
+    Dedicated,
+    Datapipe,
+    Cloud,
+}
+
+impl Display for EnforcementLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RackspaceMandated => write!(f, "RACKSPACE_MANDATED"),
+            Self::Required => write!(f, "REQUIRED"),
+            Self::Optional => write!(f, "⚠️ OPTIONAL"),
+            Self::LeaveUnchanged => write!(f, "🔙 Leave unchanged and go back."),
+        }
+    }
+}
+
+impl Display for DomainType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Domain {
     pub name: String,
     pub id: String,
     #[serde(alias = "domainMultiFactorEnforcementLevel")]
-    pub enforcement_level: String,
+    pub enforcement_level: EnforcementLevel,
 }
 
 impl Domain {
@@ -136,60 +160,89 @@ impl Domain {
         client: &WrappedClient,
         token: &String,
     ) -> anyhow::Result<ChangeStatus> {
+        let mut options = vec![
+            EnforcementLevel::Required,
+            EnforcementLevel::RackspaceMandated,
+            EnforcementLevel::Optional,
+            EnforcementLevel::LeaveUnchanged,
+        ];
+        // Don't show the option that is currently set in the domain.
+        options.retain(|value| *value != self.enforcement_level);
+
         let prompt = format!(
-            r#"Please select the new MFA enforcement level for account {} (currently set to '{}').
-    a) ⚠️ OPTIONAL (this will allow the customer to disable MFA)
-    b) RACKSPACE_MANDATED
-    c) REQUIRED
-    d) Go back and use a different account number/type
-    
-    Enter "a", "b", "c" or "d":"#,
+            "Select the new MFA enforcement level for account {} (currently set to {}):",
             self.id, self.enforcement_level
         );
+        loop {
+            let answer = match Select::new(&prompt, options.clone()).prompt() {
+                Ok(answer) => answer,
+                Err(InquireError::OperationInterrupted) => {
+                    return Err(InquireError::OperationInterrupted.into())
+                }
+                Err(e) => {
+                    error!("Cannot read new enforcement level: {e}. Please try again.");
+                    continue;
+                }
+            };
 
-        let mfa_level = read_choice(prompt.as_str(), vec!["a", "b", "c", "d"]);
-        let level = match mfa_level.as_str() {
-            "a" => "OPTIONAL",
-            "b" => "RACKSPACE_MANDATED",
-            "c" => "REQUIRED",
-            "d" => return Ok(ChangeStatus::Unchanged),
-            err => {
-                unreachable!("the universe is upside down: unhandled choice: {}", err)
-            }
-        };
-        self.set_enforcement_level(client, token, level).await?;
-        Ok(ChangeStatus::Changed)
+            let level = match answer {
+                EnforcementLevel::Optional => "OPTIONAL",
+                EnforcementLevel::RackspaceMandated => "RACKSPACE_MANDATED",
+                EnforcementLevel::Required => "REQUIRED",
+                EnforcementLevel::LeaveUnchanged => return Ok(ChangeStatus::Unchanged),
+            };
+            self.set_enforcement_level(client, token, level).await?;
+            return Ok(ChangeStatus::Changed);
+        }
     }
 }
 
 //
-pub async fn read_and_get_domain(client: &WrappedClient, token: &String) -> Domain {
+pub async fn read_and_get_domain(client: &WrappedClient, token: &String) -> anyhow::Result<Domain> {
     loop {
-        let prompt = r#"Please select an account type:
-    a) dedicated
-    b) datapipe
-    c) cloud
-        
-Enter "a", "b", or "c":"#;
+        let options = vec![
+            DomainType::Cloud,
+            DomainType::Datapipe,
+            DomainType::Dedicated,
+        ];
 
-        let account_type = read_choice(prompt, vec!["a", "b", "c"]);
-        let prefix = match account_type.as_str() {
-            "a" => "dedicated:",
-            "b" => "dp:",
-            _ => "",
-        };
-
-        let domain_id = 'domain: loop {
-            println!("Enter customer account number:");
-            match read_from_stdin() {
-                Ok(s) => break 'domain format!("{prefix}{s}"),
-                Err(e) => error!("Cannot read account number: {}.", e),
+        let prefix = 'dtype: loop {
+            let answer = Select::new("Select account type:", options.clone()).prompt();
+            break 'dtype match answer {
+                Ok(d_type) => match d_type {
+                    DomainType::Cloud => "",
+                    DomainType::Datapipe => "dp:",
+                    DomainType::Dedicated => "dedicated:",
+                },
+                Err(InquireError::OperationInterrupted) => {
+                    return Err(InquireError::OperationInterrupted.into())
+                }
+                Err(e) => {
+                    error!("Cannot read domain type: {e}");
+                    continue;
+                }
             };
         };
 
-        match Domain::get(client, token, &domain_id).await {
-            Ok(domain) => break domain,
-            Err(e) => error!("Cannot retrieve account: {e:?}"),
+        let domain = 'domain: loop {
+            let prompt = Text::new("Enter customer account number:")
+                .with_validator(MinLengthValidator::new(1))
+                .with_help_message("This field usually only contains digits.")
+                .prompt();
+            match prompt {
+                Ok(s) => break 'domain format!("{prefix}{s}"),
+                Err(InquireError::OperationInterrupted) => {
+                    return Err(InquireError::OperationInterrupted.into())
+                }
+                Err(ref e) => {
+                    error!("Cannot read account number: {e}. Please try again.")
+                }
+            };
+        };
+
+        match Domain::get(client, token, &domain).await {
+            Ok(domain) => break Ok(domain),
+            Err(e) => error!("Cannot retrieve account: {e:?}. Please verify the account type & number are correct."),
         };
     }
 }
