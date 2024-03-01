@@ -96,7 +96,7 @@ pub async fn get_token(
         .iter()
         .any(|r| r.name == "cid-internal-support" || r.name == "cid-mfa-support")
     {
-        bail!("user '{}' doesn't have the required access roles.", sso);
+        bail!("user '{}' doesn't have the required access role.", sso);
     }
     info!("Successfully authenticated and verified user roles.");
     Ok(token)
