@@ -92,10 +92,11 @@ pub async fn get_token(
     let roles: Vec<InnerRole> = try_extract(&response, "/access/user/roles")?;
     debug!("User roles: {roles:?}");
     // Check user has required roles
-    for role in ["cid-internal-support", "cid-mfa-support"] {
-        if !roles.iter().any(|r| r.name == role) {
-            bail!("user '{}' doesn't have the `{}` role.", sso, role);
-        }
+    if !roles
+        .iter()
+        .any(|r| r.name == "cid-internal-support" || r.name == "cid-mfa-support")
+    {
+        bail!("user '{}' doesn't have the required access roles.", sso);
     }
     info!("Successfully authenticated and verified user roles.");
     Ok(token)
