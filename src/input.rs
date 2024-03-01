@@ -94,11 +94,17 @@ impl Display for DomainType {
     }
 }
 
+impl Default for EnforcementLevel {
+    fn default() -> Self {
+        EnforcementLevel::Optional
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Domain {
     pub name: String,
     pub id: String,
-    #[serde(alias = "domainMultiFactorEnforcementLevel")]
+    #[serde(alias = "domainMultiFactorEnforcementLevel", default)]
     pub enforcement_level: EnforcementLevel,
 }
 
