@@ -21,7 +21,9 @@ support rackers. Before modifying an account, make sure
 the customer accepts the waiver. Unauthorized changes 
 WILL be LOGGED!
 
-Tool support: jorge.munoz/juan.davila
+Tool support: Jorge Muñoz/Juan Dávila
+Repo: https://github.com/rackerlabs/mfa-support-tool
+Wiki & Instructions: https://github.com/rackerlabs/mfa-support-tool/wiki
 ============================================================="#;
 
     println!("{}", banner_msg);
